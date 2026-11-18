@@ -174,6 +174,35 @@ bool NativeUfs::waitSet (uintptr_t base, unsigned offset, uint32_t mask, unsigne
 // The physical windows are the sheng board DT's own GCC (0x100000) and UFS host
 // (0x1d84000, 0x3000) ranges. The controller is read only if the GCC says its
 // GDSC is powered and the AXI/AHB branches are running; nothing is written.
+// The SoC's UFS host, apps SMMU and controller interrupt. SM8550 (sheng) by default; boot-arg native-ufs-soc=4350 selects
+// SM4350 (holi, moto g53 penang): ufshc@4804000 (0x3000), interrupt SPI 0x164, apps-smmu@c600000 (qsmmu-v500, 0x100000),
+// the same UFS stream 0x60 (`iommus = <&apps_smmu 0x60 0x0>` in the stock device tree). The GCC inspection
+// (native-ufs-probe=2) keeps the SM8550 clock offsets and refuses another SoC.
+struct UfsSoc {
+  uint32_t id;
+  uint64_t hc, hcSize, smmu, smmuSpan;
+  uint32_t irq;
+};
+static const UfsSoc kUfsSocs[] = {
+  { 8550, 0x01d84000ULL, 0x3000, 0x15000000ULL, 0xd0000, 265 + 32 },
+  { 4350, 0x04804000ULL, 0x3000, 0x0c600000ULL, 0x100000, 0x164 + 32 },
+};
+static const UfsSoc &ufsSoc (void)
+{
+  static const UfsSoc *selected = nullptr;
+  if (!selected) {
+    uint32_t id = 8550;
+    PE_parse_boot_argn ("native-ufs-soc", &id, sizeof (id));
+    selected = &kUfsSocs[0];
+    for (const UfsSoc &soc : kUfsSocs) {
+      if (soc.id == id) selected = &soc;
+    }
+  }
+  return *selected;
+}
+// The apps SMMU register span the geometry checks bound (SmmuTakeover.h reads it).
+extern "C" uint32_t native_ufs_smmu_span (void) { return static_cast<uint32_t> (ufsSoc ().smmuSpan); }
+
 static uintptr_t mapPhys (uint64_t phys, uint64_t length, OSSharedPtr<IOMemoryMap> &keep)
 {
   IODeviceMemory *memory = IODeviceMemory::withRange (phys, length);
@@ -187,6 +216,9 @@ static uintptr_t mapPhys (uint64_t phys, uint64_t length, OSSharedPtr<IOMemoryMa
 
 void NativeUfs::inspect (void)
 {
+  if (ufsSoc ().id != 8550) {
+    panic ("NATIVE_UFS inspect: GCC offsets are SM8550 only (native-ufs-soc=%u)", ufsSoc ().id);
+  }
   OSSharedPtr<IOMemoryMap> gccMap, memPhyMap, hcMap;
   uintptr_t gcc = mapPhys (GCC_BASE + 0x77000, 0x1000, gccMap);
   uintptr_t memPhy = mapPhys (GCC_BASE + 0x9e000, 0x1000, memPhyMap);
@@ -209,7 +241,7 @@ void NativeUfs::inspect (void)
   uint32_t cap = 0, ver = 0, hcs = 0, hce = 0, utrlba = 0, is = 0;
   unsigned readHc = 0;
   if (powered && busClocks) {
-    uintptr_t hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, hcMap);
+    uintptr_t hc = mapPhys (ufsSoc ().hc, ufsSoc ().hcSize, hcMap);
     if (hc) {
       cap = read32 (hc, 0x00);
       ver = read32 (hc, 0x08);
@@ -397,7 +429,7 @@ static unsigned gExtraBank;
 static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, uint32_t *report,
                               uint64_t dma, uint64_t bytes)
 {
-  uintptr_t smmu = mapPhys (0x15000000ULL, 0xd0000, keep);
+  uintptr_t smmu = mapPhys (ufsSoc ().smmu, ufsSoc ().smmuSpan, keep);
   if (!smmu) {
     panic ("NATIVE_UFS smmu: map failed");
   }
@@ -441,7 +473,7 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
 void NativeUfs::adoptAndRead (unsigned level)
 {
   OSSharedPtr<IOMemoryMap> hcMap;
-  uintptr_t hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, hcMap);
+  uintptr_t hc = mapPhys (ufsSoc ().hc, ufsSoc ().hcSize, hcMap);
   if (!hc) {
     panic ("NATIVE_UFS adopt: controller map failed");
   }
@@ -784,7 +816,7 @@ static uint32_t dumpWord (const volatile uint32_t *base, unsigned index)
 void NativeUfs::dumpFirmwareList (void)
 {
   OSSharedPtr<IOMemoryMap> hcMap, listMap, ucdMap;
-  uintptr_t hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, hcMap);
+  uintptr_t hc = mapPhys (ufsSoc ().hc, ufsSoc ().hcSize, hcMap);
   if (!hc) {
     panic ("NATIVE_UFS dump: controller map failed");
   }
@@ -832,7 +864,7 @@ void NativeUfs::dumpFirmwareList (void)
 void NativeUfs::inspectSmmu (void)
 {
   OSSharedPtr<IOMemoryMap> map;
-  uintptr_t smmu = mapPhys (0x15000000ULL, 0x1000, map);
+  uintptr_t smmu = mapPhys (ufsSoc ().smmu, 0x1000, map);
   if (!smmu) {
     panic ("NATIVE_UFS smmu: map failed");
   }
@@ -871,14 +903,14 @@ void NativeUfs::inspectSmmu (void)
 void NativeUfs::inspectContextBanks (void)
 {
   OSSharedPtr<IOMemoryMap> map;
-  uintptr_t smmu = mapPhys (0x15000000ULL, 0xd0000, map);
+  uintptr_t smmu = mapPhys (ufsSoc ().smmu, ufsSoc ().smmuSpan, map);
   if (!smmu) {
     panic ("NATIVE_UFS cb: map failed");
   }
   uint32_t idr1 = read32 (smmu, 0x24);
   unsigned numCb = idr1 & 0xff;
   unsigned globalPages = 1U << (((idr1 >> 28) & 7) + 1);
-  if (globalPages > 128 || numCb > 128 || (globalPages + numCb) * 0x1000 > 0xd0000) {
+  if (globalPages > 128 || numCb > 128 || (globalPages + numCb) * 0x1000 > ufsSoc ().smmuSpan) {
     panic ("NATIVE_UFS cb: unexpected geometry idr1=%08x", idr1);
   }
   unsigned cbarZero = 0, sctlrZero = 0, mSet = 0, bothZero = 0;
@@ -1016,7 +1048,7 @@ static uint64_t hostDmaAddress (const void *va);
 // because the cores register no idle exit latency (ml_delay_should_spin), and each block is charged to the task as a wakeup.
 extern "C" IOReturn armcpu_spi_attach (uint32_t, bool, void (*) (void *), void *, uint32_t *, uint64_t *) __attribute__((weak_import));
 extern "C" IOReturn armcpu_spi_mask (uint32_t, bool) __attribute__((weak_import));
-constexpr uint32_t kUfsIrq = 265 + 32;
+#define kUfsIrq (ufsSoc ().irq)
 static volatile uint32_t gIrqCount = 0;
 static bool gIrqMode = false;
 extern "C" volatile uint64_t native_ufs_irq_sleeps = 0, native_ufs_irqs = 0;
@@ -1219,7 +1251,7 @@ static bool hostBringUp (const char **why)
     return true;
   }
   gRootDiagnostic.stage = "controller map";
-  gHost.hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, gHost.hcMap);
+  gHost.hc = mapPhys (ufsSoc ().hc, ufsSoc ().hcSize, gHost.hcMap);
   if (!gHost.hc) {
     *why = "controller map";
     return false;
@@ -1378,7 +1410,7 @@ static bool hostBringUp (const char **why)
         if (r[0] != 0xffffffffU || ((smr ^ (0x1c00U + 2 * k)) & 0x7fff & ~mask)) continue;
         const uint32_t s2cr = read32 (s, 0xc00 + 4 * i), bank = s2cr & 255;
         r[0] = i | (bank << 16); r[1] = smr; r[2] = s2cr;
-        if (((s2cr >> 16) & 3) == 0 && bank < banks && (pages + banks) * 4096 <= 0xd0000) {
+        if (((s2cr >> 16) & 3) == 0 && bank < banks && (pages + banks) * 4096 <= ufsSoc ().smmuSpan) {
           const uintptr_t cb = s + (pages + bank) * 4096;
           r[3] = read32 (s, 0x1000 + 4 * bank); r[4] = read32 (s, 0x1800 + 4 * bank);
           r[5] = read32 (cb, 0x0); r[6] = read32 (cb, 0x20); r[7] = read32 (cb, 0x24); r[8] = read32 (cb, 0x30);
