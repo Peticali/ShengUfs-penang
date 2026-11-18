@@ -1305,7 +1305,10 @@ static bool hostBringUp (const char **why)
   // Smaller regions keep the same layout for their first slots: 16, then 8, then 1.
   const uint32_t sizes[3] = { uint32_t (kDmaBytes), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytesOneSlot) };
   const unsigned counts[3] = { kRegionSlots, 8, 1 };
-  for (unsigned attempt = 0; attempt < 3 && !gHost.virt; ++attempt) {
+  // native-ufs-dma-first=N (diagnostic): start at size N (0: 16 slots, 1: 8, 2: one slot).
+  unsigned firstAttempt = 0;
+  PE_parse_boot_argn ("native-ufs-dma-first", &firstAttempt, sizeof (firstAttempt));
+  for (unsigned attempt = firstAttempt < 3 ? firstAttempt : 0; attempt < 3 && !gHost.virt; ++attempt) {
     const uint32_t bytes = sizes[attempt];
     if (counts[attempt] > slots && counts[attempt] > 1) continue;
     if (gRootDiagnosticEnabled) printf ("NATIVE_UFS dma: allocating %u contiguous bytes\n", bytes);
