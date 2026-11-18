@@ -1300,6 +1300,7 @@ static bool hostBringUp (const char **why)
   const bool wide = read32 (gHost.hc, 0) & 0x01000000;
   const unsigned entries = (read32 (gHost.hc, 0) & 0x1f) + 1;
   unsigned slots = (entries + 1) / 2 < kRegionSlots ? (entries + 1) / 2 : kRegionSlots;
+  if (gRootDiagnosticEnabled) printf ("NATIVE_UFS dma: cap=%08x slots=%u wide=%u\n", read32 (gHost.hc, 0), slots, wide ? 1U : 0U);
   gHost.lock = IOLockAlloc ();
   // Smaller regions keep the same layout for their first slots: 16, then 8, then 1.
   const uint32_t sizes[3] = { uint32_t (kDmaBytes), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytesOneSlot) };
@@ -1307,6 +1308,7 @@ static bool hostBringUp (const char **why)
   for (unsigned attempt = 0; attempt < 3 && !gHost.virt; ++attempt) {
     const uint32_t bytes = sizes[attempt];
     if (counts[attempt] > slots && counts[attempt] > 1) continue;
+    if (gRootDiagnosticEnabled) printf ("NATIVE_UFS dma: allocating %u contiguous bytes\n", bytes);
     IOBufferMemoryDescriptor *dma = IOBufferMemoryDescriptor::inTaskWithOptions (
       kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
       static_cast<IOOptionBits> (kIOMemoryMapperNone),
@@ -1317,6 +1319,7 @@ static bool hostBringUp (const char **why)
     uint64_t phys = dma->getPhysicalSegment (0, &contiguous, kIOMemoryMapperNone);
     gRootDiagnostic.dma = phys;
     gRootDiagnostic.contiguous = contiguous;
+    if (gRootDiagnosticEnabled) printf ("NATIVE_UFS dma: virt=%p phys=%llx contiguous=%llx\n", virt, phys, static_cast<uint64_t> (contiguous));
     if (!virt || !phys || (phys & 4095) || contiguous < bytes || (!wide && phys + bytes > 0x100000000ULL)) {
       dma->release ();
       continue;
@@ -1331,6 +1334,7 @@ static bool hostBringUp (const char **why)
   hostSlotGeometryRegionA (regionSlots);
   hostSlotsInit (regionSlots, gHost.lock);
   native_ufs_slots = gSlotCount;
+  if (gRootDiagnosticEnabled) printf ("NATIVE_UFS dma: %u slots, clearing %u bytes\n", gSlotCount, gHost.dmaBytes);
   bzero (gHost.virt, gHost.dmaBytes);
   cacheCivac (gHost.virt, gHost.dmaBytes);
   uint32_t report[3] = { 0, 0, 0 };
