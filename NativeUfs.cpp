@@ -272,6 +272,10 @@ void NativeUfs::inspect (void)
 // to the storage. The controller is not reset and the link is not restarted; the
 // firmware's request list is stopped (refused if a request is outstanding) and replaced
 // by ours. Interrupts stay masked and completion is polled.
+// The VM's free page counters, printed by the DMA allocation trace (diagnostics; observation only).
+extern "C" unsigned int vm_page_free_count, vm_page_free_reserved;
+extern "C" uint32_t vm_page_pages;
+
 namespace {
 struct UfsResult {
   uint32_t ocs;      // UTRD overall command status; 0xf = never completed
@@ -1303,7 +1307,6 @@ static bool hostBringUp (const char **why)
   if (gRootDiagnosticEnabled) {
     // The VM's own counters (this driver is linked into the kernel): vm_page_find_contiguous only takes free pages above the
     // reserve, and with none it yields and looks at the same page again.
-    extern unsigned int vm_page_free_count, vm_page_free_reserved, vm_page_pages;
     printf ("NATIVE_UFS dma: cap=%08x slots=%u wide=%u vm free=%u reserved=%u pages=%u\n", read32 (gHost.hc, 0), slots,
             wide ? 1U : 0U, vm_page_free_count, vm_page_free_reserved, vm_page_pages);
   }
