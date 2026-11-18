@@ -1300,7 +1300,13 @@ static bool hostBringUp (const char **why)
   const bool wide = read32 (gHost.hc, 0) & 0x01000000;
   const unsigned entries = (read32 (gHost.hc, 0) & 0x1f) + 1;
   unsigned slots = (entries + 1) / 2 < kRegionSlots ? (entries + 1) / 2 : kRegionSlots;
-  if (gRootDiagnosticEnabled) printf ("NATIVE_UFS dma: cap=%08x slots=%u wide=%u\n", read32 (gHost.hc, 0), slots, wide ? 1U : 0U);
+  if (gRootDiagnosticEnabled) {
+    // The VM's own counters (this driver is linked into the kernel): vm_page_find_contiguous only takes free pages above the
+    // reserve, and with none it yields and looks at the same page again.
+    extern unsigned int vm_page_free_count, vm_page_free_reserved, vm_page_pages;
+    printf ("NATIVE_UFS dma: cap=%08x slots=%u wide=%u vm free=%u reserved=%u pages=%u\n", read32 (gHost.hc, 0), slots,
+            wide ? 1U : 0U, vm_page_free_count, vm_page_free_reserved, vm_page_pages);
+  }
   gHost.lock = IOLockAlloc ();
   // Smaller regions keep the same layout for their first slots: 16, then 8, then 1.
   const uint32_t sizes[3] = { uint32_t (kDmaBytes), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytesOneSlot) };
