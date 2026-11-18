@@ -206,6 +206,8 @@ static const UfsSoc &ufsSoc (void)
 #define kRootLun (ufsSoc ().rootLun)
 // The apps SMMU register span the geometry checks bound (SmmuTakeover.h reads it).
 extern "C" uint32_t native_ufs_smmu_span (void) { return static_cast<uint32_t> (ufsSoc ().smmuSpan); }
+// SM4350: use the firmware's own pass-through for the UFS stream (SmmuTakeover.h planUfsSmmuFirmware) before building one.
+extern "C" bool native_ufs_smmu_firmware_bypass (void) { return ufsSoc ().id == 4350; }
 
 static uintptr_t mapPhys (uint64_t phys, uint64_t length, OSSharedPtr<IOMemoryMap> &keep)
 {
