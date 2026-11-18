@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #pragma once
 // Shared production parser. Requires hostRead4k, SHA256, diagnostics and C memory primitives.
-// ---- LUN 0 GPT and the root-image manifest -------------------------------------------------
+// ---- The root LUN GPT and the root-image manifest -------------------------------------------------
+// The LUN holding "userdata" (NativeUfs.cpp selects it per SoC); LUN 0 when a host test includes this header alone.
+#ifndef kRootLun
+#define kRootLun 0
+#endif
 struct RootWindow {
   char name[32];
   uint64_t offset;   // bytes from the start of the userdata partition
@@ -10,7 +14,7 @@ struct RootWindow {
 };
 
 struct RootLayout {
-  uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0
+  uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on the root LUN (kRootLun)
   uint64_t imageBytes;                    // size of the flashed root image from the manifest (0 when none)
   uint64_t gptEntriesLba;                 // GPT facts recorded for the persistent store's before/after comparison
   uint32_t gptHeaderCrc, gptEntriesCrc, gptEntryCount;
@@ -56,13 +60,13 @@ static bool rootEntryUsed (const uint8_t *entry)
   return used != 0;
 }
 
-// Find the partition named "userdata" in LUN 0's primary GPT (4096-byte sectors), then read the
+// Find the partition named "userdata" in the root LUN's primary GPT (4096-byte sectors), then read the
 // manifest at its first block. Read-only. Returns false only if the GPT itself is unusable.
 static bool findRootLayout (RootLayout *layout, const char **why)
 {
   gRootDiagnostic.stage = "GPT header";
   bzero (layout, sizeof (*layout));
-  if (hostRead4k (0, 1, 1, gScratch) != kIOReturnSuccess) {
+  if (hostRead4k (kRootLun, 1, 1, gScratch) != kIOReturnSuccess) {
     *why = "GPT header read";
     return false;
   }
@@ -97,7 +101,7 @@ static bool findRootLayout (RootLayout *layout, const char **why)
     return false;
   }
   gRootDiagnostic.stage = "GPT entries";
-  if (hostRead4k (0, entriesLba, blocks, gScratch) != kIOReturnSuccess) {
+  if (hostRead4k (kRootLun, entriesLba, blocks, gScratch) != kIOReturnSuccess) {
     *why = "GPT entries read";
     return false;
   }
@@ -147,7 +151,7 @@ static bool findRootLayout (RootLayout *layout, const char **why)
   gRootDiagnostic.last = layout->userdataLast;
   gRootDiagnostic.stage = "root manifest";
   // First block of the partition: manifest if the root image was flashed, ext4 otherwise.
-  if (hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
+  if (hostRead4k (kRootLun, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
     *why = "userdata first block read";
     return false;
   }

@@ -178,14 +178,17 @@ bool NativeUfs::waitSet (uintptr_t base, unsigned offset, uint32_t mask, unsigne
 // SM4350 (holi, moto g53 penang): ufshc@4804000 (0x3000), interrupt SPI 0x164, apps-smmu@c600000 (qsmmu-v500, 0x100000),
 // the same UFS stream 0x60 (`iommus = <&apps_smmu 0x60 0x0>` in the stock device tree). The GCC inspection
 // (native-ufs-probe=2) keeps the SM8550 clock offsets and refuses another SoC.
+// rootLun is the logical unit whose GPT holds "userdata" (the root image, the Data store and the log window): LUN 0 on
+// SM8550, LUN 4 on the moto g53 (its stock GPT; the earlier penang sweet_ufs driver booted with ufslun=4).
 struct UfsSoc {
   uint32_t id;
   uint64_t hc, hcSize, smmu, smmuSpan;
   uint32_t irq;
+  uint8_t rootLun;
 };
 static const UfsSoc kUfsSocs[] = {
-  { 8550, 0x01d84000ULL, 0x3000, 0x15000000ULL, 0xd0000, 265 + 32 },
-  { 4350, 0x04804000ULL, 0x3000, 0x0c600000ULL, 0x100000, 0x164 + 32 },
+  { 8550, 0x01d84000ULL, 0x3000, 0x15000000ULL, 0xd0000, 265 + 32, 0 },
+  { 4350, 0x04804000ULL, 0x3000, 0x0c600000ULL, 0x100000, 0x164 + 32, 4 },
 };
 static const UfsSoc &ufsSoc (void)
 {
@@ -200,6 +203,7 @@ static const UfsSoc &ufsSoc (void)
   }
   return *selected;
 }
+#define kRootLun (ufsSoc ().rootLun)
 // The apps SMMU register span the geometry checks bound (SmmuTakeover.h reads it).
 extern "C" uint32_t native_ufs_smmu_span (void) { return static_cast<uint32_t> (ufsSoc ().smmuSpan); }
 
@@ -1618,7 +1622,7 @@ extern "C" int native_ufs_store_read (uint64_t rel, uint32_t blocks, void *dst)
   int ok = 1;
   while (blocks) {
     uint32_t chunk = blocks > kXferMax / 4096 ? static_cast<uint32_t> (kXferMax / 4096) : blocks;
-    if (hostRead4k (0, gStoreRegionFirst + rel, chunk, dst) != kIOReturnSuccess) { ok = 0; break; }
+    if (hostRead4k (kRootLun, gStoreRegionFirst + rel, chunk, dst) != kIOReturnSuccess) { ok = 0; break; }
     dst = static_cast<uint8_t *> (dst) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
@@ -1636,7 +1640,7 @@ static int storeWrite (uint64_t rel, uint32_t blocks, const void *src, bool fua)
   int ok = 1;
   while (blocks) {
     uint32_t chunk = blocks > kXferMax / 4096 ? static_cast<uint32_t> (kXferMax / 4096) : blocks;
-    if (hostWrite4k (0, gStoreRegionFirst + rel, chunk, src, fua) != kIOReturnSuccess) { ok = 0; break; }
+    if (hostWrite4k (kRootLun, gStoreRegionFirst + rel, chunk, src, fua) != kIOReturnSuccess) { ok = 0; break; }
     src = static_cast<const uint8_t *> (src) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
@@ -1822,7 +1826,7 @@ extern "C" int native_ufs_log_write (uint64_t rel, uint32_t blocks, const void *
   if (!gLogRegionBlocks || !src || !blocks || rel >= gLogRegionBlocks || blocks > gLogRegionBlocks - rel) return 0;
   while (blocks) {
     uint32_t chunk = blocks > kDataMax / 4096 ? static_cast<uint32_t> (kDataMax / 4096) : blocks;
-    if (hostWrite4k (0, gLogRegionFirst + rel, chunk, src) != kIOReturnSuccess) return 0;
+    if (hostWrite4k (kRootLun, gLogRegionFirst + rel, chunk, src) != kIOReturnSuccess) return 0;
     src = static_cast<const uint8_t *> (src) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
@@ -1839,7 +1843,7 @@ extern "C" int native_ufs_export_write (uint64_t rel, uint32_t blocks, const voi
   const uint64_t base = gLogRegionFirst - kExportBlocks;
   while (blocks) {
     uint32_t chunk = blocks > kDataMax / 4096 ? static_cast<uint32_t> (kDataMax / 4096) : blocks;
-    if (hostWrite4k (0, base + rel, chunk, src) != kIOReturnSuccess) return 0;
+    if (hostWrite4k (kRootLun, base + rel, chunk, src) != kIOReturnSuccess) return 0;
     src = static_cast<const uint8_t *> (src) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
@@ -1897,13 +1901,13 @@ extern "C" unsigned native_ufs_store_gpt_check (void)
 {
   if (!gStoreGeometry.valid || !gHost.ready) return 1;
   static uint8_t block[4096];
-  if (hostRead4k (0, 1, 1, block) != kIOReturnSuccess) return 2;
+  if (hostRead4k (kRootLun, 1, 1, block) != kIOReturnSuccess) return 2;
   uint32_t headerBytes = le32 (block + 12);
   if (headerBytes < 92 || headerBytes > 4096 || rootCrc32 (block, headerBytes, true) != le32 (block + 16) ||
       le32 (block + 16) != gStoreGeometry.headerCrc) return 3;
   uint32_t blocks = (gStoreGeometry.entryCount * 128 + 4095) / 4096;
   static uint8_t entries[4096 * 4];
-  if (blocks > 4 || hostRead4k (0, gStoreGeometry.entriesLba, blocks, entries) != kIOReturnSuccess) return 4;
+  if (blocks > 4 || hostRead4k (kRootLun, gStoreGeometry.entriesLba, blocks, entries) != kIOReturnSuccess) return 4;
   return rootCrc32 (entries, gStoreGeometry.entryCount * 128) == gStoreGeometry.entriesCrc ? 0 : 5;
 }
 
@@ -2097,7 +2101,7 @@ static bool readPolicyTable (const char *window, uint8_t *table, uint64_t tableB
   while (done < tableBytes) {
     uint64_t left = tableBytes - done;
     uint32_t blocks = static_cast<uint32_t> (left >= kDataMax ? kDataMax / 4096 : (left + 4095) / 4096);
-    if (hostRead4k (0, lba, blocks, gScratch) != kIOReturnSuccess) return false;
+    if (hostRead4k (kRootLun, lba, blocks, gScratch) != kIOReturnSuccess) return false;
     uint64_t take = left < blocks * 4096ULL ? left : blocks * 4096ULL;
     memcpy (table + done, gScratch, take);
     done += take;
@@ -2125,7 +2129,7 @@ struct VrootKernelOps {
   void wakeup (void *event) { IOLockWakeup (gVrootLock, event, false); }
   // Straight to the transport: the table object is not a window, so this read never needs a verified read or an allocation.
   bool readPage (const VrootTable &table, uint64_t page, void *dst) {
-    return hostRead4k (0, table.firstLba + page, 1, dst) == kIOReturnSuccess;
+    return hostRead4k (kRootLun, table.firstLba + page, 1, dst) == kIOReturnSuccess;
   }
   bool sha256 (const void *data, size_t bytes, uint8_t out[32]) { return vr_xnu_crypto.sha256 (data, bytes, out) != 0; }
 };
@@ -2180,7 +2184,7 @@ static bool hashPolicyTable (uint64_t lba, uint64_t hashBytes, uint8_t *buffer, 
   for (uint64_t done = 0, page = 0; done < hashBytes;) {
     const uint64_t left = hashBytes - done;
     const uint32_t blocks = static_cast<uint32_t> (left >= kDataMax ? kDataMax / 4096 : (left + 4095) / 4096);
-    if (hostRead4k (0, lba, blocks, buffer) != kIOReturnSuccess) return false;
+    if (hostRead4k (kRootLun, lba, blocks, buffer) != kIOReturnSuccess) return false;
     const uint64_t take = left < blocks * 4096ULL ? left : blocks * 4096ULL;
     SHA256_Update (&table, buffer, take);
     if (envelope) SHA384_Update (&outer, buffer, take);
@@ -2489,7 +2493,7 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
     void unlock () {}
     IOReturn read (uint64_t lba, uint32_t blocks, void *out) {
       uint64_t t0 = timerTicks ();
-      IOReturn r = hostRead4k (0, lba, blocks, out);
+      IOReturn r = hostRead4k (kRootLun, lba, blocks, out);
       __atomic_fetch_add (&native_ufs_read_ticks, timerTicks () - t0, __ATOMIC_RELAXED);
       return r;
     }
@@ -2910,7 +2914,7 @@ bool NativeUfs::start (IOService *provider)
     uint32_t seen[4] = {};
     for (uint32_t index = 0; index < layout->windows && index < 4; index++) {
       uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
-      if (hostRead4k (0, absolute / 4096, 1, gScratch) == kIOReturnSuccess) {
+      if (hostRead4k (kRootLun, absolute / 4096, 1, gScratch) == kIOReturnSuccess) {
         seen[index] = 1;
         sig[index][0] = le32 (gScratch + 512);
         sig[index][1] = le32 (gScratch + 516);

@@ -2,6 +2,10 @@
 // Shared production command path. Included inside the root transport namespace.
 // The host harness replaces only MMIO, DMA synchronization, clock and lock primitives.
 // One command slot (RootTransportLayout.h): its request list entry, command descriptor and data area.
+// The LUN holding "userdata" (NativeUfs.cpp selects it per SoC); LUN 0 when a host test includes this header alone.
+#ifndef kRootLun
+#define kRootLun 0
+#endif
 struct UfsSlot {
   unsigned index;
   uint32_t entry, bit;     // request list entry and its doorbell bit
@@ -518,7 +522,7 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
 }
 
 // ---- Persistent store and log windows ------------------------------------------------------------------------------
-// The only place this driver writes. At most two windows of 4096-byte LBAs on LUN 0 (the Data store and the diagnostic log),
+// The only place this driver writes. At most two windows of 4096-byte LBAs on the root LUN (kRootLun) (the Data store and the diagnostic log),
 // each opened once by its integration after it has proved that the window lies inside the userdata partition and clear of the
 // root image; every write is checked against them again here, so nothing outside them can be written even if a caller is wrong.
 static bool gStoreOpen = false, gLogOpen = false;
@@ -550,10 +554,10 @@ static bool hostStoreOpen (uint64_t first, uint64_t blocks)
   return true;
 }
 
-// WRITE(10) of `blocks` 4096-byte blocks from src to lba on LUN 0; the range must lie inside one open window.
+// WRITE(10) of `blocks` 4096-byte blocks from src to lba on the root LUN; the range must lie inside one open window.
 static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const void *src, bool fua = false)
 {
-  if (!gHost.ready || !src || !blocks || blocks > kXferMax / 4096 || lun != 0 || !hostInWindow (lba, blocks)) {
+  if (!gHost.ready || !src || !blocks || blocks > kXferMax / 4096 || lun != kRootLun || !hostInWindow (lba, blocks)) {
     return kIOReturnBadArgument;
   }
   UfsPrd prd[kMaxPrds];
@@ -576,7 +580,7 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
   uint32_t scsi = 0;
   IOReturn status;
   for (unsigned attempt = 0;; ++attempt) {
-    status = hostScsiDir (slot, 0, cdb, 10, 1, blocks * 4096U, 2000000, &scsi, prds ? prd : nullptr, prds, prds ? src : nullptr);
+    status = hostScsiDir (slot, kRootLun, cdb, 10, 1, blocks * 4096U, 2000000, &scsi, prds ? prd : nullptr, prds, prds ? src : nullptr);
     if (!hostRetryable (status, scsi, attempt)) break;
   }
   hostSlotGive (slot, pooled);
@@ -593,7 +597,7 @@ static IOReturn hostSyncCache (void)
   uint32_t scsi = 0;
   IOReturn status;
   for (unsigned attempt = 0;; ++attempt) {
-    status = hostScsiDir (slot, 0, cdb, 10, 0, 0, 10000000, &scsi);
+    status = hostScsiDir (slot, kRootLun, cdb, 10, 0, 0, 10000000, &scsi);
     if (!hostRetryable (status, scsi, attempt)) break;
   }
   hostSlotGive (slot, pooled);

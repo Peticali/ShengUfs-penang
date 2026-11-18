@@ -4,7 +4,7 @@
 //
 // A window's hash table (one SHA-256 per 4096-byte image block, 128 entries per 4096-byte table page) is authenticated once
 // against the owner-signed header while its pages are hashed; only those page hashes stay in memory (read-only). A block
-// verification takes its table entry from a cached table page, or reads that page from the table object on LUN 0, checks it
+// verification takes its table entry from a cached table page, or reads that page from the table object on the root LUN, checks it
 // against the kept page hash and caches it. A table page that does not match is never cached and its blocks are refused.
 //
 // The cache is preallocated and wired: a fill allocates nothing and reads through the transport directly, never through a
@@ -18,7 +18,7 @@ struct VrootTable {
   uint32_t *where;             // cache entry + 1 that holds each table page, 0 for none; guarded by the cache lock
   uint64_t tableBytes;         // block count * 32
   uint64_t pages;              // table pages
-  uint64_t firstLba;           // LUN 0 block of the first table page
+  uint64_t firstLba;           // root LUN block of the first table page
 };
 
 enum : uint32_t { kVrootEmpty = 0, kVrootFilling = 1, kVrootValid = 2 };
