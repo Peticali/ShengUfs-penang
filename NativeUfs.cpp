@@ -272,6 +272,51 @@ void NativeUfs::inspect (void)
 // to the storage. The controller is not reset and the link is not restarted; the
 // firmware's request list is stopped (refused if a request is outstanding) and replaced
 // by ours. Interrupts stay masked and completion is polled.
+// penang XNU (patches/xnu/penang-thread-kernel-frames.patch): another thread's kernel return addresses, state and wait event.
+extern "C" int penang_thread_kernel_frames (thread_t thread, uint64_t *pcs, int max, uint64_t *wait_event, int *state);
+
+// With native-ufs-diagnostics=1 the DMA region is allocated by a helper thread: when the allocation has not returned
+// after 15 s, the panic names where that thread is (its frames, scheduler state and wait event) instead of a silent stop.
+struct UfsDmaJob {
+  uint32_t bytes;
+  IOBufferMemoryDescriptor *result;
+  volatile uint32_t done;
+};
+static IOBufferMemoryDescriptor *ufsDmaAllocate (uint32_t bytes)
+{
+  return IOBufferMemoryDescriptor::inTaskWithOptions (
+    kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
+    static_cast<IOOptionBits> (kIOMemoryMapperNone),
+    bytes, 4096);
+}
+static void ufsDmaWorker (void *parameter, wait_result_t)
+{
+  UfsDmaJob *job = static_cast<UfsDmaJob *> (parameter);
+  job->result = ufsDmaAllocate (job->bytes);
+  __atomic_store_n (&job->done, 1U, __ATOMIC_RELEASE);
+}
+static IOBufferMemoryDescriptor *ufsDmaAllocateWatched (uint32_t bytes, bool watched)
+{
+  static UfsDmaJob job;
+  thread_t worker = THREAD_NULL;
+  if (!watched) return ufsDmaAllocate (bytes);
+  job.bytes = bytes; job.result = nullptr; job.done = 0;
+  if (kernel_thread_start (ufsDmaWorker, &job, &worker) != KERN_SUCCESS) return ufsDmaAllocate (bytes);
+  for (unsigned tick = 0; tick < 150 && !__atomic_load_n (&job.done, __ATOMIC_ACQUIRE); ++tick) IOSleep (100);
+  if (!__atomic_load_n (&job.done, __ATOMIC_ACQUIRE)) {
+    uint64_t pcs[14] = {}, event = 0;
+    int state = 0;
+    const int count = penang_thread_kernel_frames (worker, pcs, 14, &event, &state);
+    panic ("NATIVE_UFS dma: %u-byte allocation stuck 15 s\n"
+           "thread state=%x wait=%llx frames=%d IOSleep=%llx\n"
+           "%llx %llx %llx %llx\n%llx %llx %llx %llx\n%llx %llx %llx %llx\n%llx %llx",
+           bytes, state, event, count, reinterpret_cast<uint64_t> (&IOSleep),
+           pcs[0], pcs[1], pcs[2], pcs[3], pcs[4], pcs[5], pcs[6], pcs[7], pcs[8], pcs[9], pcs[10], pcs[11], pcs[12], pcs[13]);
+  }
+  thread_deallocate (worker);
+  return job.result;
+}
+
 // The VM's free page counters, printed by the DMA allocation trace (diagnostics; observation only).
 extern "C" unsigned int vm_page_free_count, vm_page_free_reserved;
 extern "C" uint32_t vm_page_pages;
@@ -1321,10 +1366,7 @@ static bool hostBringUp (const char **why)
     const uint32_t bytes = sizes[attempt];
     if (counts[attempt] > slots && counts[attempt] > 1) continue;
     if (gRootDiagnosticEnabled) printf ("NATIVE_UFS dma: allocating %u contiguous bytes\n", bytes);
-    IOBufferMemoryDescriptor *dma = IOBufferMemoryDescriptor::inTaskWithOptions (
-      kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
-      static_cast<IOOptionBits> (kIOMemoryMapperNone),
-      bytes, 4096);
+    IOBufferMemoryDescriptor *dma = ufsDmaAllocateWatched (bytes, gRootDiagnosticEnabled);
     if (!dma) continue;
     uint8_t *virt = static_cast<uint8_t *> (dma->getBytesNoCopy ());
     IOByteCount contiguous = 0;
