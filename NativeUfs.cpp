@@ -1265,6 +1265,14 @@ static void hostSlotsUpgrade (unsigned regionSlots, unsigned entries, bool wide)
 // Bring the live controller up for reading: map, SMMU pass-through for the UFS stream, take over
 // the request list, wake the device from UFS-PowerDown and wait for LUN 0 to be ready.
 // `why` receives a short reason on failure.
+// Each bring-up stage goes to gRootDiagnostic (read by panics) and, with native-ufs-diagnostics=1, to the console as it starts,
+// so a stage that never returns is named on the screen.
+static void bringUpStage (const char *stage)
+{
+  gRootDiagnostic.stage = stage;
+  if (gRootDiagnosticEnabled) printf ("NATIVE_UFS bring-up: %s\n", stage);
+}
+
 static bool hostBringUp (const char **why)
 {
   if (gHost.poisoned) {
@@ -1274,7 +1282,7 @@ static bool hostBringUp (const char **why)
   if (gHost.ready) {
     return true;
   }
-  gRootDiagnostic.stage = "controller map";
+  bringUpStage ("controller map");
   gHost.hc = mapPhys (ufsSoc ().hc, ufsSoc ().hcSize, gHost.hcMap);
   if (!gHost.hc) {
     *why = "controller map";
@@ -1286,7 +1294,7 @@ static bool hostBringUp (const char **why)
     gRootDiagnostic.hcs = read32 (gHost.hc, 0x30);
     gRootDiagnostic.hce = read32 (gHost.hc, 0x34);
   }
-  gRootDiagnostic.stage = "DMA allocation";
+  bringUpStage ("DMA allocation");
   // All kSlots command slots when the region is physically contiguous and addressable, else slot 0's original layout alone. The
   // request list must also have entries for them (CAP.NUTRS, entries 0, 2, ...).
   const bool wide = read32 (gHost.hc, 0) & 0x01000000;
@@ -1326,8 +1334,10 @@ static bool hostBringUp (const char **why)
   bzero (gHost.virt, gHost.dmaBytes);
   cacheCivac (gHost.virt, gHost.dmaBytes);
   uint32_t report[3] = { 0, 0, 0 };
-  gRootDiagnostic.stage = "SMMU and request list";
+  bringUpStage ("SMMU and request list");
+  bringUpStage ("SMMU and request list: stop queue");
   if (!hostStopQueue (why)) return false;
+  bringUpStage ("SMMU and request list: UFS stream");
   smmuBypassStream (0x60, gHost.smmuMap, report, gHost.phys, gHost.dmaBytes);
   gHost.smmu = gHost.smmuMap->getVirtualAddress ();
   // The board's WiFi endpoint (wifi=2 or more) needs a pass-through stream of its own, set up here with the same code and at the same moment as the
@@ -1475,8 +1485,9 @@ static bool hostBringUp (const char **why)
     gDmaLimit = limit;
   }
   hostSlotsUpgrade (regionSlots, entries, wide);
+  bringUpStage ("SMMU and request list: start queue");
   if (!hostStartQueue (why)) return false;
-  gRootDiagnostic.stage = "NOP OUT";
+  bringUpStage ("NOP OUT");
   // NOP OUT proves the transport before touching the SCSI layer.
   if (hostNop () != kIOReturnSuccess) {
     gHost.ready = false;
@@ -1484,7 +1495,7 @@ static bool hostBringUp (const char **why)
     return false;
   }
   uint32_t power = 0;
-  gRootDiagnostic.stage = "power mode query";
+  bringUpStage ("power mode query");
   if (hostQueryRead (0x03, 0x02, &power) != kIOReturnSuccess) {
     gHost.ready = false;
     *why = "power mode query";
@@ -1492,7 +1503,7 @@ static bool hostBringUp (const char **why)
   }
   gRootDiagnostic.power = power;
   if ((power & 0xff) != 0x11) {
-    gRootDiagnostic.stage = "device wake";
+    bringUpStage ("device wake");
     // START STOP UNIT, power condition ACTIVE, to the UFS Device well-known LU (as Linux resumes).
     uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
     uint32_t scsi = 0;
@@ -1503,7 +1514,7 @@ static bool hostBringUp (const char **why)
     }
     IOSleep (50);
   }
-  gRootDiagnostic.stage = "LUN ready";
+  bringUpStage ("LUN ready");
   for (unsigned attempt = 0; attempt < 20; attempt++) {
     uint8_t tur[6] = { 0, 0, 0, 0, 0, 0 };
     uint32_t scsi = 0;
