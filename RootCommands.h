@@ -391,6 +391,11 @@ static bool gHostPanic = false;
 
 static void hostSlotsInit (unsigned count, IOLock *lock)
 {
+  // native-ufs-slots=N (penang): at most N slots, the last kept for the panic path as always; 2 serializes every command (one in
+  // flight), to tell a concurrency race from a controller fault (u27-dp1/dp2 under smp=1: a READ whose doorbell bit cleared while its
+  // OCS stayed 0xf, "UFS ROOT FAILURE: root window read failed").
+  unsigned limit = 0;
+  if (PE_parse_boot_argn ("native-ufs-slots", &limit, sizeof (limit)) && limit >= 2 && limit < count) count = limit;
   gSlotCount = count < 1 ? 1 : count > kSlots ? kSlots : count;
   gSlotFree = gSlotCount > 1 ? (1U << (gSlotCount - 1)) - 1 : 1;
   gSlotLock = lock;
