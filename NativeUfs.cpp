@@ -933,15 +933,33 @@ void NativeUfs::inspectContextBanks (void)
     }
   }
   uintptr_t cb0 = smmu + globalPages * 0x1000, cb1 = cb0 + 0x1000, cbLast = cb0 + (numCb - 1) * 0x1000;
+  // The bank the firmware's stream-match entry for the UFS stream (0x60) points at, if any (penang: SMR 3 -> bank 2):
+  // whether it translates (SCTLR.M) and with which table, so a reuse of the firmware's mapping can be judged.
+  uint32_t idr0 = read32 (smmu, 0x20), groups = idr0 & 0xff, ufsSmr = 0xffff, ufsS2cr = 0, ufsBank = 0xffff;
+  for (unsigned index = 0; index < groups && index < 128; index++) {
+    uint32_t smr = read32 (smmu, 0x800 + 4 * index), mask = (smr >> 16) & 0x7fff;
+    if ((smr & 0x80000000U) && ((((smr ^ 0x60U) & 0x7fffU) & ~mask) == 0)) {
+      ufsSmr = index;
+      ufsS2cr = read32 (smmu, 0xc00 + 4 * index);
+      if (((ufsS2cr >> 16) & 3) == 0 && (ufsS2cr & 0xff) < numCb) ufsBank = ufsS2cr & 0xff;
+      break;
+    }
+  }
+  uintptr_t cbUfs = ufsBank < numCb ? cb0 + ufsBank * 0x1000 : 0;
   panic ("NATIVE_UFS cb survey\n"
          "ncb=%u pages=%u cbar0=%u sctlr0=%u msset=%u both0=%u first0=%x\n"
          "cbar[0]=%08x cbar[1]=%08x cbar[%u]=%08x\n"
          "sctlr[0]=%08x sctlr[1]=%08x sctlr[last]=%08x\n"
-         "cba2r[0]=%08x cba2r[1]=%08x",
+         "cba2r[0]=%08x cba2r[1]=%08x\n"
+         "ufs smr%x s2cr=%08x bank=%x cbar=%08x cba2r=%08x\n"
+         "ufs sctlr=%08x tcr=%08x tcr2=%08x ttbr0=%08x%08x fsr=%08x",
          numCb, globalPages, cbarZero, sctlrZero, mSet, bothZero, firstZero,
          read32 (smmu, 0x1000), read32 (smmu, 0x1004), numCb - 1, read32 (smmu, 0x1000 + 4 * (numCb - 1)),
          read32 (cb0, 0), read32 (cb1, 0), read32 (cbLast, 0),
-         read32 (smmu, 0x1800), read32 (smmu, 0x1804));
+         read32 (smmu, 0x1800), read32 (smmu, 0x1804),
+         ufsSmr, ufsS2cr, ufsBank, cbUfs ? read32 (smmu, 0x1000 + 4 * ufsBank) : 0, cbUfs ? read32 (smmu, 0x1800 + 4 * ufsBank) : 0,
+         cbUfs ? read32 (cbUfs, 0x0) : 0, cbUfs ? read32 (cbUfs, 0x30) : 0, cbUfs ? read32 (cbUfs, 0x10) : 0,
+         cbUfs ? read32 (cbUfs, 0x24) : 0, cbUfs ? read32 (cbUfs, 0x20) : 0, cbUfs ? read32 (cbUfs, 0x58) : 0);
 }
 
 // ======================================================================================
