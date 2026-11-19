@@ -98,6 +98,10 @@ static volatile uint8_t gSlotOpcode[kSlots] = {};
 // Commands whose doorbell bit cleared without a visible OCS (UfsTransferEnd::Lost), and those sent again after one, for the log.
 static volatile uint64_t gLostCompletions = 0, gLostRetries = 0;
 static unsigned gLostRetryLimit = 3;   // native-ufs-lost-retries
+// Data command timeout (READ/WRITE). Linux's SCSI layer gives UFS commands 30 s; 1 s timed out a READ that was still in flight
+// (DB=1 at the deadline, done just after: u27-long2 at ~13 min, CMD n=409046, result e00002d6) under lsd's LaunchServices rebuild.
+// boot-arg native-ufs-timeout-ms.
+static uint32_t gDataTimeoutUs = 30000000;
 
 static IOReturn hostIssue (const UfsSlot &slot, uint32_t direction, uint32_t dataBytes, uint32_t timeoutUs, uint64_t *deadline,
                            uint32_t *ocs, const UfsPrd *prd = nullptr, unsigned prds = 0, const void *buffer = nullptr)
@@ -407,6 +411,9 @@ static void hostSlotsInit (unsigned count, IOLock *lock)
   if (PE_parse_boot_argn ("native-ufs-slots", &limit, sizeof (limit)) && limit >= 2 && limit < count) count = limit;
   unsigned lostRetries = 0;
   if (PE_parse_boot_argn ("native-ufs-lost-retries", &lostRetries, sizeof (lostRetries))) gLostRetryLimit = lostRetries;
+  unsigned timeoutMs = 0;
+  if (PE_parse_boot_argn ("native-ufs-timeout-ms", &timeoutMs, sizeof (timeoutMs)) && timeoutMs >= 100 && timeoutMs <= 600000)
+    gDataTimeoutUs = timeoutMs * 1000U;
   gSlotCount = count < 1 ? 1 : count > kSlots ? kSlots : count;
   gSlotFree = gSlotCount > 1 ? (1U << (gSlotCount - 1)) - 1 : 1;
   gSlotLock = lock;
@@ -537,7 +544,7 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
   uint32_t scsi = 0;
   IOReturn status;
   for (unsigned attempt = 0, lost = 0;; ++attempt) {
-    status = hostScsiDir (slot, lun, cdb, 10, 2, blocks * 4096U, 1000000, &scsi, prds ? prd : nullptr, prds, prds ? dst : nullptr);
+    status = hostScsiDir (slot, lun, cdb, 10, 2, blocks * 4096U, gDataTimeoutUs, &scsi, prds ? prd : nullptr, prds, prds ? dst : nullptr);
     if (hostLostRetryable (status, lost)) { ++lost; continue; }
     if (!hostRetryable (status, scsi, attempt)) break;
   }
@@ -607,7 +614,7 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
   uint32_t scsi = 0;
   IOReturn status;
   for (unsigned attempt = 0;; ++attempt) {
-    status = hostScsiDir (slot, kRootLun, cdb, 10, 1, blocks * 4096U, 2000000, &scsi, prds ? prd : nullptr, prds, prds ? src : nullptr);
+    status = hostScsiDir (slot, kRootLun, cdb, 10, 1, blocks * 4096U, gDataTimeoutUs, &scsi, prds ? prd : nullptr, prds, prds ? src : nullptr);
     if (!hostRetryable (status, scsi, attempt)) break;
   }
   hostSlotGive (slot, pooled);
@@ -624,7 +631,7 @@ static IOReturn hostSyncCache (void)
   uint32_t scsi = 0;
   IOReturn status;
   for (unsigned attempt = 0;; ++attempt) {
-    status = hostScsiDir (slot, kRootLun, cdb, 10, 0, 0, 10000000, &scsi);
+    status = hostScsiDir (slot, kRootLun, cdb, 10, 0, 0, gDataTimeoutUs > 10000000 ? gDataTimeoutUs : 10000000, &scsi);
     if (!hostRetryable (status, scsi, attempt)) break;
   }
   hostSlotGive (slot, pooled);
