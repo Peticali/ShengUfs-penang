@@ -46,6 +46,16 @@ int main()
   UfsTransferPoll e;
   assert(pollUfsTransfer(stuck, e) == UfsTransferEnd::Timeout && stuck.reads == 0);
 
+  // u27-lsd1b: accepted (DB=1), doorbell clear again, OCS never written -> Lost (the slot is free), not a Timeout.
+  FakePort lost{{{1, 15, 0}, {0, 15, 0}, {0, 15, 0}}};
+  UfsTransferPoll g;
+  assert(pollUfsTransfer(lost, g) == UfsTransferEnd::Lost && g.ocs == 15 && g.doorbellSeen == 1);
+
+  // Accepted, cleared, then still owned at the deadline: a Timeout.
+  FakePort reowned{{{1, 15, 0}, {0, 15, 0}, {1, 15, 0}}};
+  UfsTransferPoll h;
+  assert(pollUfsTransfer(reowned, h) == UfsTransferEnd::Timeout);
+
   for (unsigned bit = 0; bit < 32; ++bit) {
     uint32_t mask = uint32_t(1) << bit;
     if (!(mask & kUfsFatalStatus)) continue;
@@ -54,5 +64,5 @@ int main()
     assert(pollUfsTransfer(fatal, f) == UfsTransferEnd::Fatal);
     assert(fatal.reads == 0 && f.interruptSeen == mask); // Fatal wins over OCS=0.
   }
-  puts("PASS: unaccepted, delayed, immediate, failed, stuck and fatal UFS completions");
+  puts("PASS: unaccepted, delayed, immediate, failed, stuck, lost and fatal UFS completions");
 }

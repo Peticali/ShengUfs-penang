@@ -95,6 +95,9 @@ static volatile uint64_t gDirectCommands = 0, gStagedCommands = 0;
 // SCSI opcode, or the UPIU transaction type for others). The log names the oldest, so a command that does not complete is visible.
 static volatile uint64_t gSlotIssuedAt[kSlots] = {};
 static volatile uint8_t gSlotOpcode[kSlots] = {};
+// Commands whose doorbell bit cleared without a visible OCS (UfsTransferEnd::Lost), and those sent again after one, for the log.
+static volatile uint64_t gLostCompletions = 0, gLostRetries = 0;
+static unsigned gLostRetryLimit = 3;   // native-ufs-lost-retries
 
 static IOReturn hostIssue (const UfsSlot &slot, uint32_t direction, uint32_t dataBytes, uint32_t timeoutUs, uint64_t *deadline,
                            uint32_t *ocs, const UfsPrd *prd = nullptr, unsigned prds = 0, const void *buffer = nullptr)
@@ -175,7 +178,7 @@ static IOReturn hostAwait (const UfsSlot &slot, uint32_t dataBytes, uint64_t dea
   UfsTransferPoll state;
   UfsTransferEnd end = pollUfsTransfer (port, state);
   __atomic_store_n (&gSlotIssuedAt[slot.index], 0, __ATOMIC_RELAXED);
-  if (end == UfsTransferEnd::Completed) {
+  if (end == UfsTransferEnd::Completed || end == UfsTransferEnd::Lost) {
     __atomic_and_fetch (&gOutstanding, ~slot.bit, __ATOMIC_RELEASE);
     hostWaitDone (port.started);
   }
@@ -183,6 +186,12 @@ static IOReturn hostAwait (const UfsSlot &slot, uint32_t dataBytes, uint64_t dea
   gRootDiagnostic.dbSeen = state.doorbellSeen;
   gRootDiagnostic.isSeen = state.interruptSeen;
   *ocs = state.ocs;
+  if (end == UfsTransferEnd::Lost) {
+    // The slot is free again (doorbell bit clear) but its completion never became visible: not poisoned, the caller may send the
+    // command again (hostLostRetryable). penang u27-lsd1b: READ(10) n=358791 lun 4, DB seen then clear, OCS 0xf for the whole second.
+    __atomic_fetch_add (&gLostCompletions, 1, __ATOMIC_RELAXED);
+    return recordTransport (kIOReturnAborted, *ocs);
+  }
   if (end != UfsTransferEnd::Completed) {
     // No cancel/reset/retry: the controller may still own the buffer, even
     // with DB=0. Keep it allocated and prohibit all subsequent CPU writes.
@@ -396,6 +405,8 @@ static void hostSlotsInit (unsigned count, IOLock *lock)
   // OCS stayed 0xf, "UFS ROOT FAILURE: root window read failed").
   unsigned limit = 0;
   if (PE_parse_boot_argn ("native-ufs-slots", &limit, sizeof (limit)) && limit >= 2 && limit < count) count = limit;
+  unsigned lostRetries = 0;
+  if (PE_parse_boot_argn ("native-ufs-lost-retries", &lostRetries, sizeof (lostRetries))) gLostRetryLimit = lostRetries;
   gSlotCount = count < 1 ? 1 : count > kSlots ? kSlots : count;
   gSlotFree = gSlotCount > 1 ? (1U << (gSlotCount - 1)) - 1 : 1;
   gSlotLock = lock;
@@ -468,6 +479,16 @@ static bool hostRetryable (IOReturn status, uint32_t scsi, unsigned attempt)
   return true;
 }
 
+// A lost completion (hostAwait: kIOReturnAborted) of a read is sent again, up to native-ufs-lost-retries times (default 3, 0 = off).
+// Reads only: the slot is free and the device has nothing to undo; the root window's verification still checks the data.
+static bool hostLostRetryable (IOReturn status, unsigned lostAttempt)
+{
+  if (status != kIOReturnAborted || lostAttempt >= gLostRetryLimit) return false;
+  __atomic_fetch_add (&gLostRetries, 1, __ATOMIC_RELAXED);
+  IODelay (100);
+  return true;
+}
+
 // The PRDT of a buffer for zero copy: its pages' DMA addresses (hostDmaAddress, supplied by the port; 0 = not reachable), adjacent
 // pages merged. 0 when the buffer does not qualify (not page aligned, a partial page, longer than kXferMax, an unreachable page, more
 // than kMaxPrds entries): the caller then uses the slot's data area.
@@ -515,8 +536,9 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
                       0, uint8_t (blocks >> 8), uint8_t (blocks), 0 };
   uint32_t scsi = 0;
   IOReturn status;
-  for (unsigned attempt = 0;; ++attempt) {
+  for (unsigned attempt = 0, lost = 0;; ++attempt) {
     status = hostScsiDir (slot, lun, cdb, 10, 2, blocks * 4096U, 1000000, &scsi, prds ? prd : nullptr, prds, prds ? dst : nullptr);
+    if (hostLostRetryable (status, lost)) { ++lost; continue; }
     if (!hostRetryable (status, scsi, attempt)) break;
   }
   if (status == kIOReturnSuccess && !prds) {

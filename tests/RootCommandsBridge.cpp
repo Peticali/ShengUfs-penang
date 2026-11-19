@@ -10,7 +10,7 @@
 using IOReturn = uint32_t;
 constexpr IOReturn kIOReturnSuccess=0, kIOReturnError=0xe00002bc,
   kIOReturnBadArgument=0xe00002c2, kIOReturnIOError=0xe00002ca,
-  kIOReturnBusy=0xe00002d5, kIOReturnTimeout=0xe00002d6, kIOReturnNotReady=0xe00002d8;
+  kIOReturnBusy=0xe00002d5, kIOReturnTimeout=0xe00002d6, kIOReturnNotReady=0xe00002d8, kIOReturnAborted=0xe00002eb;
 #include "../RootTransportLayout.h"
 constexpr unsigned kMicrosecondScale=1;
 constexpr unsigned kMillisecondScale=1000;
@@ -35,6 +35,7 @@ static void clock_interval_to_deadline(uint32_t interval, unsigned scale, uint64
 }
 static uint64_t mach_absolute_time() { return callback(4,0,0,nullptr); }
 static void IODelay(uint32_t us) { callback(5,0,us,nullptr); }
+static bool PE_parse_boot_argn(const char *, void *, int) { return false; }   // no boot-args on the host
 static void IOLockLock(void *) {}
 static void IOLockUnlock(void *) {}
 static bool IOLockTryLock(void *) { return true; }
